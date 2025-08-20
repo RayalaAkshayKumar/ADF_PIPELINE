@@ -1,0 +1,64 @@
+name: Deploy ADF to Prod (on publish)
+
+on:
+  push:
+    branches:
+      - main   # run whenever ADF Studio publishes
+
+jobs:
+  deploy-adf:
+    runs-on: ubuntu-latest
+    env:
+      ADF2_NAME: ${{ secrets.ADF2_NAME }}
+      ADF2_RG:   ${{ secrets.ADF2_RESOURCE_GROUP }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Azure login (client secret)
+        uses: azure/login@v1
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            }
+      - name: Ensure Data Factory CLI extension
+        run: |
+          az extension add --name datafactory --only-show-errors || az extension update --name datafactory
+      - name: Stop running triggers in PROD
+        run: |
+          names=$(az datafactory trigger list \
+            --resource-group "$ADF2_RG" \
+            --factory-name "$ADF2_NAME" \
+            --query "[?properties.runtimeState=='Started'].name" -o tsv)
+          for n in $names; do
+            echo "Stopping trigger: $n"
+            az datafactory trigger stop --resource-group "$ADF2_RG" --factory-name "$ADF2_NAME" --name "$n"
+          done
+        shell: bash
+
+      - name: Deploy ARM template to PROD
+        uses: azure/arm-deploy@v2
+        with:
+          scope: resourcegroup
+          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          resourceGroupName: ${{ secrets.ADF2_RESOURCE_GROUP }}
+          template: ./mydatasfactorys2025/ARMTemplateForFactory.json
+          parameters: ./mydatasfactorys2025/ARMTemplateParametersForFactory.json
+          deploymentName: adf-publish-${{ github.run_number }}
+
+      - name: Start stopped triggers in PROD
+        run: |
+          names=$(az datafactory trigger list \
+            --resource-group "$ADF2_RG" \
+            --factory-name "$ADF2_NAME" \
+            --query "[?properties.runtimeState=='Stopped'].name" -o tsv)
+          for n in $names; do
+            echo "Starting trigger: $n"
+            az datafactory trigger start --resource-group "$ADF2_RG" --factory-name "$ADF2_NAME" --name "$n"
+          done
+        shell: bash
